@@ -81,8 +81,7 @@
 -export([info/1, info/2, info/3, info/4,
          proc_count/2, proc_window/3,
          bin_leak/1,
-         node_stats_print/2, node_stats_list/2, node_stats/4,
-         scheduler_usage/1]).
+         node_stats_print/2, node_stats_list/2, node_stats/4]).
 -export([get_state/1, get_state/2]).
 -export([remote_load/1, remote_load/2,
          source/1]).
@@ -113,7 +112,7 @@
 
 -type info_meta_key() :: registered_name | dictionary | group_leader | status.
 -type info_signals_key() :: links | monitors | monitored_by | trap_exit.
--type info_location_key() :: initial_call | current_stacktrace.
+-type info_location_key() :: initial_call | current_function.
 -type info_memory_key() :: memory | message_queue_len | heap_size
                          | total_heap_size | garbage_collection.
 -type info_work_key() :: reductions.
@@ -125,7 +124,7 @@
 
 -type port_info_type() :: meta | signals | io | memory_used | specific.
 
--type port_info_meta_key() :: registered_name | id | name | os_pid.
+-type port_info_meta_key() :: registered_name | id | name.
 -type port_info_signals_key() :: connected | links | monitors.
 -type port_info_io_key() :: input | output.
 -type port_info_memory_key() :: memory | queue_size.
@@ -206,7 +205,7 @@ info(PidTerm, meta) ->
 info(PidTerm, signals) ->
     info_type(PidTerm, signals, [links, monitors, monitored_by, trap_exit]);
 info(PidTerm, location) ->
-    info_type(PidTerm, location, [initial_call, current_stacktrace]);
+    info_type(PidTerm, location, [initial_call, current_function]);
 info(PidTerm, memory_used) ->
     info_type(PidTerm, memory_used, [memory, message_queue_len, heap_size,
                                      total_heap_size, garbage_collection]);
@@ -337,39 +336,6 @@ bin_leak(N) ->
 node_stats_print(N, Interval) ->
     node_stats(N, Interval, fun(X, _) -> io:format("~p~n",[X]) end, ok).
 
-%% @doc Because Erlang CPU usage as reported from `top' isn't the most
-%% reliable value (due to schedulers doing idle spinning to avoid going
-%% to sleep and impacting latency), a metric exists that is based on
-%% scheduler wall time.
-%%
-%% For any time interval, Scheduler wall time can be used as a measure
-%% of how 'busy' a scheduler is. A scheduler is busy when:
-%%
-%% <ul>
-%%    <li>executing process code</li>
-%%    <li>executing driver code</li>
-%%    <li>executing NIF code</li>
-%%    <li>executing BIFs</li>
-%%    <li>garbage collecting</li>
-%%    <li>doing memory management</li>
-%% </ul>
-%%
-%% A scheduler isn't busy when doing anything else.
--spec scheduler_usage(Millisecs) -> [{SchedulerId, Usage}] when
-    Millisecs :: non_neg_integer(),
-    SchedulerId :: pos_integer(),
-    Usage :: number().
-scheduler_usage(Interval) when is_integer(Interval) ->
-    %% We start and stop the scheduler_wall_time system flag if
-    %% it wasn't in place already. Usually setting the flag should
-    %% have a CPU impact (making it higher) only when under low usage.
-    FormerFlag = erlang:system_flag(scheduler_wall_time, true),
-    First = erlang:statistics(scheduler_wall_time),
-    timer:sleep(Interval),
-    Last = erlang:statistics(scheduler_wall_time),
-    erlang:system_flag(scheduler_wall_time, FormerFlag),
-    recon_lib:scheduler_usage_diff(First, Last).
-
 %% @doc Shorthand for `node_stats(N, Interval, fun(X,Acc) -> [X|Acc] end, [])'
 %% with the results reversed to be in the right temporal order.
 -spec node_stats_list(Repeat, Interval) -> [Stats] when
@@ -402,10 +368,8 @@ node_stats_list(N, Interval) ->
       Stats :: {[Absolutes::{atom(),term()}],
                 [Increments::{atom(),term()}]}.
 node_stats(N, Interval, FoldFun, Init) ->
-    %% Turn on scheduler wall time if it wasn't there already
-    FormerFlag = erlang:system_flag(scheduler_wall_time, true),
     %% Stats is an ugly fun, but it does its thing.
-    Stats = fun({{OldIn,OldOut},{OldGCs,OldWords,_}, SchedWall}) ->
+    Stats = fun({{OldIn,OldOut},{OldGCs,OldWords,_}}) ->
         %% Absolutes
         ProcC = erlang:system_info(process_count),
         RunQ = erlang:statistics(run_queue),
@@ -425,8 +389,6 @@ node_stats(N, Interval, FoldFun, Init) ->
         GCCount = GCs-OldGCs,
         GCWords = Words-OldWords,
         {_, Reds} = erlang:statistics(reductions),
-        SchedWallNew = erlang:statistics(scheduler_wall_time),
-        SchedUsage = recon_lib:scheduler_usage_diff(SchedWall, SchedWallNew),
          %% Stats Results
         {{[{process_count,ProcC}, {run_queue,RunQ},
            {error_logger_queue_len,LogQ}, {memory_total,Tot},
@@ -434,19 +396,16 @@ node_stats(N, Interval, FoldFun, Init) ->
            {memory_bin,Bin}, {memory_ets,Ets}],
           [{bytes_in,BytesIn}, {bytes_out,BytesOut},
            {gc_count,GCCount}, {gc_words_reclaimed,GCWords},
-           {reductions,Reds}, {scheduler_usage, SchedUsage}]},
+           {reductions,Reds}]},
          %% New State
-         {{In,Out}, GC, SchedWallNew}}
+         {{In,Out}, GC}}
     end,
     {{input,In},{output,Out}} = erlang:statistics(io),
     Gc = erlang:statistics(garbage_collection),
-    SchedWall = erlang:statistics(scheduler_wall_time), 
     Result = recon_lib:time_fold(
             N, Interval, Stats,
-            {{In,Out}, Gc, SchedWall},
+            {{In,Out}, Gc},
             FoldFun, Init),
-    %% Set scheduler wall time back to what it was
-    erlang:system_flag(scheduler_wall_time, FormerFlag),
     Result.
 
 %%% OTP & Manipulations %%%
@@ -616,7 +575,7 @@ port_info(PortTerm) ->
     ;          (port_term(), [atom()]) -> [{atom(), term()}]
     ;          (port_term(), atom()) -> {atom(), term()}.
 port_info(PortTerm, meta) ->
-    {meta, List} = port_info_type(PortTerm, meta, [id, name, os_pid]),
+    {meta, List} = port_info_type(PortTerm, meta, [id, name]),
     case port_info(PortTerm, registered_name) of
         [] -> {meta, List};
         Name -> {meta, [Name | List]}
