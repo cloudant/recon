@@ -113,7 +113,7 @@
 
 -type info_meta_key() :: registered_name | dictionary | group_leader | status.
 -type info_signals_key() :: links | monitors | monitored_by | trap_exit.
--type info_location_key() :: initial_call | current_stacktrace.
+-type info_location_key() :: initial_call | current_function.
 -type info_memory_key() :: memory | message_queue_len | heap_size
                          | total_heap_size | garbage_collection.
 -type info_work_key() :: reductions.
@@ -206,7 +206,7 @@ info(PidTerm, meta) ->
 info(PidTerm, signals) ->
     info_type(PidTerm, signals, [links, monitors, monitored_by, trap_exit]);
 info(PidTerm, location) ->
-    info_type(PidTerm, location, [initial_call, current_stacktrace]);
+    info_type(PidTerm, location, [initial_call, current_function]);
 info(PidTerm, memory_used) ->
     info_type(PidTerm, memory_used, [memory, message_queue_len, heap_size,
                                      total_heap_size, garbage_collection]);
