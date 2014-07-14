@@ -11,7 +11,8 @@
          inet_attrs/1, inet_attrs/2,
          triple_to_pid/3, term_to_pid/1,
          term_to_port/1,
-         time_map/5, time_fold/6]).
+         time_map/5, time_fold/6,
+         first_call/1]).
 %% private exports
 -export([binary_memory/1]).
 
@@ -206,6 +207,25 @@ time_fold(N, Interval, Fun, State, FoldFun, Init) ->
     timer:sleep(Interval),
     Acc = FoldFun(Res,Init),
     time_fold(N-1,Interval,Fun,NewState,FoldFun,Acc).
+
+%% @doc Find the first function call for a Pid taking into account cases
+%% where '$initial_call' is set in the process dictionary.
+-spec first_call(Pid) -> {Module, Function, Arity} when
+      Pid :: pid(),
+      Module :: atom(),
+      Function :: atom(),
+      Arity :: non_neg_integer().
+first_call(Pid) ->
+    IC = case process_info(Pid, initial_call) of
+        {initial_call, IC0} -> IC0;
+        undefined -> undefined
+    end,
+    Dict = case process_info(Pid, dictionary) of
+        {dictionary, Dict0} -> Dict0;
+        undefined -> []
+    end,
+    MaybeCall = proplists:get_value('$initial_call', Dict, IC),
+    proplists:get_value(initial_call, Dict, MaybeCall).
 
 %% @private crush binaries from process_info into their amount of place
 %% taken in memory.
