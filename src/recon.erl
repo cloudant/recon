@@ -82,7 +82,9 @@
          proc_count/2, proc_window/3,
          bin_leak/1,
          node_stats_print/2, node_stats_list/2, node_stats/4,
-         scheduler_usage/1]).
+         scheduler_usage/1,
+         show_first_call_counts/0, show_current_call_counts/0,
+         find_by_first_call/2, find_by_current_call/2]).
 -export([get_state/1, get_state/2]).
 -export([remote_load/1, remote_load/2,
          source/1]).
@@ -448,6 +450,73 @@ node_stats(N, Interval, FoldFun, Init) ->
     %% Set scheduler wall time back to what it was
     erlang:system_flag(scheduler_wall_time, FormerFlag),
     Result.
+
+%% @doc Show the list of first calls sorted by the number of
+%% processes that had that initial call.
+-spec show_first_call_counts() -> [{Count, {Module, Function, Arity}}] when
+      Count :: pos_integer(),
+      Module :: atom(),
+      Function :: atom(),
+      Arity :: non_neg_integer().
+show_first_call_counts() ->
+    Res = lists:foldl(fun(Pid, Acc) ->
+        dict:update_counter(recon_lib:first_call(Pid), 1, Acc)
+    end, dict:new(), processes()),
+    Rev = [{Count, Call} || {Call, Count} <- dict:to_list(Res)],
+    lists:reverse(lists:sort(Rev)).
+
+%% @doc Show the list of current calls sorted by the number of
+%% processes that had that current call.
+-spec show_current_call_counts() -> [{Count, {Module, Function, Arity}}] when
+      Count :: pos_integer(),
+      Module :: atom(),
+      Function :: atom(),
+      Arity :: non_neg_integer().
+show_current_call_counts() ->
+    Res = lists:foldl(fun(Pid, Acc) ->
+        case process_info(Pid, current_function) of
+            {current_function, Call} ->
+                dict:update_counter(Call, 1, Acc);
+            undefined ->
+                Acc
+        end
+    end, dict:new(), processes()),
+    Rev = [{Count, Call} || {Call, Count} <- dict:to_list(Res)],
+    lists:reverse(lists:sort(Rev)).
+
+%% @doc Specify a module and function and this function will return
+%% the list of pids that were started with that function. This is
+%% useful to find an entire class of processes for debugging.
+-spec find_by_first_call(Module, Function) -> [Pid] when
+      Module :: atom(),
+      Function :: atom(),
+      Pid :: pid().
+find_by_first_call(Module, Function) ->
+    FilterPids = fun(Pid) ->
+        case recon_lib:first_call(Pid) of
+            {Module, Function, _} -> true;
+            _ -> false
+        end
+    end,
+    lists:filter(FilterPids, processes()).
+
+%% @doc Specify a module and function and this function will return
+%% the list of pids currently in that function. This is useful for
+%% finding all processes that are stuck in the same spot.
+-spec find_by_current_call(Module, Function) -> [Pid] when
+      Module :: atom(),
+      Function :: atom(),
+      Pid :: pid().
+find_by_current_call(Module, Function) ->
+    FilterPids = fun(Pid) ->
+        case process_info(Pid, current_function) of
+            {current_function, {Module, Function, _}} ->
+                true;
+            _ ->
+                false
+        end
+    end,
+    lists:filter(FilterPids, processes()).
 
 %%% OTP & Manipulations %%%
 
