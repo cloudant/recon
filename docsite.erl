@@ -1,6 +1,6 @@
 #!/usr/bin/env escript
 %% -*- erlang -*-
-%%! -smp disable
+%%!
 %% This script takes the EDoc output page, and tries to bring them to
 %% a more modern format suitable for a recon site.
 %% Run with `escript docsite.erl' or as `./docsite.erl'. The script
@@ -16,7 +16,8 @@ main() -> main([]).
 
 main(_) ->
     ok = filelib:ensure_dir(?SITEPATH), % output directory
-    "==> recon (doc)\n" = os:cmd("./rebar doc"), % build docs
+    Output = os:cmd("rebar3 edoc"), % build docs
+    {match, _} = re:run(Output, "Running edoc"),
     Overview = ?DOCPATH "overview-summary.html",
     Modules = filelib:wildcard(filename:join(?DOCPATH, "recon*.html")),
     [Pre,Post] = base(["index.html" | Modules]),

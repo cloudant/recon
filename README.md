@@ -5,7 +5,7 @@ Recon wants to be a set of tools usable in production to diagnose Erlang problem
 
 To build the library:
 
-    ./rebar compile
+    rebar3 compile
 
 Documentation for the library can be obtained at http://ferd.github.io/recon/
 
@@ -16,7 +16,7 @@ Current Status
 
 [![Build Status](https://travis-ci.org/ferd/recon.png)](https://travis-ci.org/ferd/recon)
 
-Versions supported: R15B02 and up
+Versions supported: OTP-17 and up. Support of R16B03-1 down to R15B02 is best effort.
 
 Changelog
 ---------
@@ -27,9 +27,42 @@ all stable changes of the first version of Recon.
 
 *2.x*
 
-- 2.2.1 Upcoming (master branch, still in development):
+- 2.3.6
+  - Adapting for OTP-21. Includes the 'deprecation' of `recon:files/0`
+    since OTP-21 no longer supports listing all file descriptors, and
+    removing `error_logger_queue_len` from node stats since a new
+    logging mechanism was introduced in-process instead.
+- 2.3.5
+  - fixing timefold's first iteration to prevent errors at call-site
+    by sleeping before sampling
+- 2.3.4
+  - fixing edoc tag that broke some downstream packaging attempts
+- 2.3.3
+  - fixing `bin_leak` arith errors
+  - fixes to `recon_alloc:allocators/1` (incl. R16 compatibility)
+  - fix errors in scheduler wall time calculations
+  - `term_to_pid` supports binaries
+- 2.3.2
+  - Allow the `return_to` option in `recon_trace`
+  - More efficient sorting function for procs and ports attributes
+    (thanks to @zhongwencool and @pichi)
+  - Allow the usage of `return_trace` in `recon_trace:calls/2-3` instead
+    of `fun(_) -> return_trace() end`.
+- 2.3.1
+  - Updated `app_deps` script to run with rebar3 dependencies
+  - Minor docs update
+- 2.3.0
+  - Doc made clearer around semantics of `recon:proc_count` and
+    `recon:proc_window`.
+  - Fix doc typos
+  - Fix potential race condition on waiting for death of tracing process
+  - Add an option which allows sending tracing output somewhere other than
+    group_leader() (thanks @djnym)
+  - Add ability to pass custom formatter function when tracing (thanks @iilyak)
+- 2.2.1
   - Fixing type specs for `recon:port_types/0` and `recon_lib:count/1`,
     thanks to @lucafavatella
+  - Minor documentation fixes.
 - 2.2.0:
   - Adding scheduler info metrics to get a more accurate picture than what
     top and CPU gives.

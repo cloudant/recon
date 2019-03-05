@@ -12,7 +12,8 @@
          triple_to_pid/3, term_to_pid/1,
          term_to_port/1,
          time_map/5, time_fold/6,
-         scheduler_usage_diff/2]).
+         scheduler_usage_diff/2,
+         sublist_top_n_attrs/2]).
 %% private exports
 -export([binary_memory/1]).
 
@@ -76,8 +77,11 @@ port_list(Attr, Val) ->
 %% all processes of the node, except the caller.
 -spec proc_attrs(term()) -> [recon:proc_attrs()].
 proc_attrs(AttrName) ->
-    [Attrs || Pid <- processes() -- [self()],
-              {ok, Attrs} <- [proc_attrs(AttrName, Pid)]].
+    Self = self(),
+    [Attrs || Pid <- processes(),
+	      Pid =/= Self,
+              {ok, Attrs} <- [proc_attrs(AttrName, Pid)]
+	].
 
 %% @doc Returns the attributes of a given process. This form of attributes
 %% is standard for most comparison functions for processes in recon.
@@ -149,6 +153,7 @@ triple_to_pid(X, Y, Z) ->
 term_to_pid(Pid) when is_pid(Pid) -> Pid;
 term_to_pid(Name) when is_atom(Name) -> whereis(Name);
 term_to_pid(List = "<0."++_) -> list_to_pid(List);
+term_to_pid(Binary = <<"<0.", _/binary>>) -> list_to_pid(binary_to_list(Binary));
 term_to_pid({global, Name}) -> global:whereis_name(Name);
 term_to_pid({via, Module, Name}) -> Module:whereis_name(Name);
 term_to_pid({X,Y,Z}) when is_integer(X), is_integer(Y), is_integer(Z) ->
@@ -203,26 +208,76 @@ time_map(N, Interval, Fun, State, MapFun) ->
 time_fold(0, _, _, _, _, Acc) ->
     Acc;
 time_fold(N, Interval, Fun, State, FoldFun, Init) ->
-    {Res, NewState} = Fun(State),
     timer:sleep(Interval),
+    {Res, NewState} = Fun(State),
     Acc = FoldFun(Res,Init),
     time_fold(N-1,Interval,Fun,NewState,FoldFun,Acc).
 
 %% @doc Diffs two runs of erlang:statistics(scheduler_wall_time) and
 %% returns usage metrics in terms of cores and 0..1 percentages.
--spec scheduler_usage_diff(SchedTime, SchedTime) -> [{SchedulerId, Usage}] when
+-spec scheduler_usage_diff(SchedTime, SchedTime) -> undefined | [{SchedulerId, Usage}] when
     SchedTime :: [{SchedulerId, ActiveTime, TotalTime}],
     SchedulerId :: pos_integer(),
     Usage :: number(),
     ActiveTime :: non_neg_integer(),
     TotalTime :: non_neg_integer().
+scheduler_usage_diff(First, Last) when First =:= undefined orelse Last =:= undefined ->
+    undefined;
 scheduler_usage_diff(First, Last) ->
     lists:map(
-        fun({{I, A0, T0}, {I, A1, T1}}) -> {I, (A1 - A0)/(T1 - T0)} end,
+        fun ({{I, _A0, T}, {I, _A1, T}}) -> {I, 0.0}; % Avoid divide by zero
+            ({{I, A0, T0}, {I, A1, T1}}) -> {I, (A1 - A0)/(T1 - T0)}
+        end,
         lists:zip(lists:sort(First), lists:sort(Last))
     ).
+
+%% @doc Returns the top n element of a list of process or inet attributes
+-spec sublist_top_n_attrs([Attrs], pos_integer()) -> [Attrs]
+    when Attrs :: recon:proc_attrs() | recon:inet_attrs().
+sublist_top_n_attrs(_, 0) ->
+    %% matching lists:sublist/2 behaviour
+    [];
+sublist_top_n_attrs(List, Len) ->
+    pheap_fill(List, Len, []).
 
 %% @private crush binaries from process_info into their amount of place
 %% taken in memory.
 binary_memory(Bins) ->
     lists:foldl(fun({_,Mem,_}, Tot) -> Mem+Tot end, 0, Bins).
+
+%%%%%%%%%%%%%%%
+%%% PRIVATE %%%
+%%%%%%%%%%%%%%%
+pheap_fill(List, 0, Heap) ->
+    pheap_full(List, Heap);
+pheap_fill([], _, Heap) ->
+    pheap_to_list(Heap, []);
+pheap_fill([{Y, X, _} = H|T], N, Heap) ->
+    pheap_fill(T, N-1, insert({{X, Y}, H}, Heap)).
+
+pheap_full([], Heap) ->
+    pheap_to_list(Heap, []);
+pheap_full([{Y, X, _} = H|T], [{K, _}|HeapT] = Heap) ->
+    case {X, Y} of
+        N when N > K ->
+            pheap_full(T, insert({N, H}, merge_pairs(HeapT)));
+        _ ->
+            pheap_full(T, Heap)
+    end.
+
+pheap_to_list([], Acc) -> Acc;
+pheap_to_list([{_, H}|T], Acc) ->
+    pheap_to_list(merge_pairs(T), [H|Acc]).
+
+-compile({inline, [insert/2, merge/2]}).
+insert(E, []) -> [E];        %% merge([E], H)
+insert(E, [E2|_] = H) when E =< E2 -> [E, H];
+insert(E, [E2|H]) -> [E2, [E]|H].
+
+merge(H1, []) -> H1;
+merge([E1|H1], [E2|_]=H2) when E1 =< E2 -> [E1, H2|H1];
+merge(H1, [E2|H2]) -> [E2, H1|H2].
+
+merge_pairs([]) -> [];
+merge_pairs([H]) -> H;
+merge_pairs([A, B|T]) -> merge(merge(A, B), merge_pairs(T)).

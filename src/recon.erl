@@ -251,22 +251,16 @@ proc_fake([binary_memory|T1], [{binary,Bins}|T2]) ->
 proc_fake([_|T1], [H|T2]) ->
     [H | proc_fake(T1,T2)].
 
-%% @doc Fetches a given attribute from all processes and returns
-%% the biggest `Num' consumers.
-%% @todo Implement this function so it only stores `Num' entries in
-%% memory at any given time, instead of as many as there are
-%% processes.
+%% @doc Fetches a given attribute from all processes (except the
+%% caller) and returns the biggest `Num' consumers.
 -spec proc_count(AttributeName, Num) -> [proc_attrs()] when
       AttributeName :: atom(),
       Num :: non_neg_integer().
 proc_count(AttrName, Num) ->
-    lists:sublist(lists:usort(
-        fun({_,A,_},{_,B,_}) -> A > B end,
-        recon_lib:proc_attrs(AttrName)
-    ), Num).
+    recon_lib:sublist_top_n_attrs(recon_lib:proc_attrs(AttrName), Num).
 
-%% @doc Fetches a given attribute from all processes and returns
-%% the biggest entries, over a sliding time window.
+%% @doc Fetches a given attribute from all processes (except the
+%% caller) and returns the biggest entries, over a sliding time window.
 %%
 %% This function is particularly useful when processes on the node
 %% are mostly short-lived, usually too short to inspect through other
@@ -297,10 +291,7 @@ proc_count(AttrName, Num) ->
 proc_window(AttrName, Num, Time) ->
     Sample = fun() -> recon_lib:proc_attrs(AttrName) end,
     {First,Last} = recon_lib:sample(Time, Sample),
-    lists:sublist(lists:usort(
-        fun({_,A,_},{_,B,_}) -> A > B end,
-        recon_lib:sliding_window(First, Last)
-    ), Num).
+    recon_lib:sublist_top_n_attrs(recon_lib:sliding_window(First, Last), Num).
 
 %% @doc Refc binaries can be leaking when barely-busy processes route them
 %% around and do little else, or when extremely busy processes reach a stable
@@ -317,25 +308,24 @@ proc_window(AttrName, Num, Time) ->
 %% for more details on refc binaries
 -spec bin_leak(pos_integer()) -> [proc_attrs()].
 bin_leak(N) ->
-    lists:sublist(
-        lists:usort(
-            fun({K1,V1,_},{K2,V2,_}) -> {V1,K1} =< {V2,K2} end,
-            [try
-                {ok, {_,Pre,Id}} = recon_lib:proc_attrs(binary, Pid),
-                erlang:garbage_collect(Pid),
-                {ok, {_,Post,_}} = recon_lib:proc_attrs(binary, Pid),
-                {Pid, length(Post)-length(Pre), Id}
-            catch
-                _:_ -> {Pid, 0, []}
-            end || Pid <- processes()]),
-        N).
+    Procs = recon_lib:sublist_top_n_attrs([
+        try
+            {ok, {_,Pre,Id}} = recon_lib:proc_attrs(binary, Pid),
+            erlang:garbage_collect(Pid),
+            {ok, {_,Post,_}} = recon_lib:proc_attrs(binary, Pid),
+            {Pid, length(Pre) - length(Post), Id}
+        catch
+            _:_ -> {Pid, 0, []}
+        end || Pid <- processes()
+    ], N),
+    [{Pid, -Val, Id} ||{Pid, Val, Id} <-Procs].
 
 %% @doc Shorthand for `node_stats(N, Interval, fun(X,_) -> io:format("~p~n",[X]) end, nostate)'.
 -spec node_stats_print(Repeat, Interval) -> term() when
       Repeat :: non_neg_integer(),
       Interval :: pos_integer().
 node_stats_print(N, Interval) ->
-    node_stats(N, Interval, fun(X, _) -> io:format("~p~n",[X]) end, ok).
+    node_stats(N, Interval, fun(X, _) -> io:format("~p~n", [X]) end, ok).
 
 %% @doc Because Erlang CPU usage as reported from `top' isn't the most
 %% reliable value (due to schedulers doing idle spinning to avoid going
@@ -355,7 +345,7 @@ node_stats_print(N, Interval) ->
 %% </ul>
 %%
 %% A scheduler isn't busy when doing anything else.
--spec scheduler_usage(Millisecs) -> [{SchedulerId, Usage}] when
+-spec scheduler_usage(Millisecs) -> undefined | [{SchedulerId, Usage}] when
     Millisecs :: non_neg_integer(),
     SchedulerId :: pos_integer(),
     Usage :: number().
@@ -378,7 +368,7 @@ scheduler_usage(Interval) when is_integer(Interval) ->
       Stats :: {[Absolutes::{atom(),term()}],
                 [Increments::{atom(),term()}]}.
 node_stats_list(N, Interval) ->
-    lists:reverse(node_stats(N, Interval, fun(X,Acc) -> [X|Acc] end, [])).
+    lists:reverse(node_stats(N, Interval, fun(X, Acc) -> [X|Acc] end, [])).
 
 %% @doc Gathers statistics `N' time, waiting `Interval' milliseconds between
 %% each run, and accumulates results using a folding function `FoldFun'.
@@ -386,7 +376,8 @@ node_stats_list(N, Interval) ->
 %%
 %% Absolutes are values that keep changing with time, and are useful to know
 %% about as a datapoint: process count, size of the run queue, error_logger
-%% queue length, and the memory of the node (total, processes, atoms, binaries,
+%% queue length in versions before OTP-21 or those thar run it explicitely,
+%% and the memory of the node (total, processes, atoms, binaries,
 %% and ets tables).
 %%
 %% Increments are values that are mostly useful when compared to a previous
@@ -402,6 +393,10 @@ node_stats_list(N, Interval) ->
       Stats :: {[Absolutes::{atom(),term()}],
                 [Increments::{atom(),term()}]}.
 node_stats(N, Interval, FoldFun, Init) ->
+    Logger = case whereis(error_logger) of
+        undefined -> logger;
+        _ -> error_logger
+    end,
     %% Turn on scheduler wall time if it wasn't there already
     FormerFlag = erlang:system_flag(scheduler_wall_time, true),
     %% Stats is an ugly fun, but it does its thing.
@@ -409,7 +404,14 @@ node_stats(N, Interval, FoldFun, Init) ->
         %% Absolutes
         ProcC = erlang:system_info(process_count),
         RunQ = erlang:statistics(run_queue),
-        {_,LogQ} = process_info(whereis(error_logger),  message_queue_len),
+        LogQ = case Logger of
+            error_logger ->
+                {_,LogQLen} = process_info(whereis(error_logger),
+                                           message_queue_len),
+                LogQLen;
+            _ ->
+                undefined
+        end,
         %% Mem (Absolutes)
         Mem = erlang:memory(),
         Tot = proplists:get_value(total, Mem),
@@ -428,8 +430,9 @@ node_stats(N, Interval, FoldFun, Init) ->
         SchedWallNew = erlang:statistics(scheduler_wall_time),
         SchedUsage = recon_lib:scheduler_usage_diff(SchedWall, SchedWallNew),
          %% Stats Results
-        {{[{process_count,ProcC}, {run_queue,RunQ},
-           {error_logger_queue_len,LogQ}, {memory_total,Tot},
+        {{[{process_count,ProcC}, {run_queue,RunQ}] ++
+          [{error_logger_queue_len,LogQ} || LogQ =/= undefined] ++
+          [{memory_total,Tot},
            {memory_procs,ProcM}, {memory_atoms,Atom},
            {memory_bin,Bin}, {memory_ets,Ets}],
           [{bytes_in,BytesIn}, {bytes_out,BytesOut},
@@ -521,6 +524,9 @@ udp() -> recon_lib:port_list(name, "udp_inet").
 sctp() -> recon_lib:port_list(name, "sctp_inet").
 
 %% @doc returns a list of all file handles open on the node.
+%% @deprecated Starting with OTP-21, files are implemented as NIFs
+%% and can no longer be listed. This function returns an empty list
+%% in such a case.
 -spec files() -> [port()].
 files() -> recon_lib:port_list(name, "efile").
 
@@ -542,19 +548,12 @@ port_types() ->
 %% of packets sent, received, or both (`send_cnt', `recv_cnt', `cnt',
 %% respectively). Individual absolute values for each metric will be returned
 %% in the 3rd position of the resulting tuple.
-%%
-%% @todo Implement this function so it only stores `Num' entries in
-%% memory at any given time, instead of as many as there are
-%% processes.
 -spec inet_count(AttributeName, Num) -> [inet_attrs()] when
       AttributeName :: 'recv_cnt' | 'recv_oct' | 'send_cnt' | 'send_oct'
                      | 'cnt' | 'oct',
       Num :: non_neg_integer().
 inet_count(Attr, Num) ->
-    lists:sublist(lists:usort(
-        fun({_,A,_},{_,B,_}) -> A > B end,
-        recon_lib:inet_attrs(Attr)
-    ), Num).
+    recon_lib:sublist_top_n_attrs(recon_lib:inet_attrs(Attr), Num).
 
 %% @doc Fetches a given attribute from all inet ports (TCP, UDP, SCTP)
 %% and returns the biggest entries, over a sliding time window.
@@ -576,10 +575,7 @@ inet_count(Attr, Num) ->
 inet_window(Attr, Num, Time) when is_atom(Attr) ->
     Sample = fun() -> recon_lib:inet_attrs(Attr) end,
     {First,Last} = recon_lib:sample(Time, Sample),
-    lists:sublist(lists:usort(
-        fun({_,A,_},{_,B,_}) -> A > B end,
-        recon_lib:sliding_window(First, Last)
-    ), Num).
+    recon_lib:sublist_top_n_attrs(recon_lib:sliding_window(First, Last), Num).
 
 %% @doc Allows to be similar to `erlang:port_info/1', but allows
 %% more flexible port usage: usual ports, ports that were registered

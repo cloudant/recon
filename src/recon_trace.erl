@@ -39,7 +39,7 @@
 %%%  |               -,        ,-               |
 %%%   '-,              '-,  ,-'              ,-'
 %%%      '-,_          _,-''-,_          _,-'
-%%%          '--------'        '--------' 
+%%%          '--------'        '--------'
 %%% '''
 %%%
 %%% If either the pid specification excludes a process or a trace pattern
@@ -152,36 +152,59 @@
 %%% In case the operator is tracing from a remote shell which gets
 %%% disconnected, the links between the shell and the tracer should make it
 %%% so tracing is automatically turned off once you disconnect.
+%%%
+%%% If sending output to the Group Leader is not desired, you may specify
+%%% a different pid() via the option `io_server' in the {@link calls/3} function.
+%%% For instance to write the traces to a file you can do something like
+%%%
+%%% ```
+%%% 1> {ok, Dev} = file:open("/tmp/trace",[write]).
+%%% 2> recon_trace:calls({queue, in, fun(_) -> return_trace() end}, 3, [{io_server, Dev}]).
+%%% 1
+%%% 3>
+%%% Recon tracer rate limit tripped.
+%%% 4> file:close(Dev).
+%%% '''
+%%%
+%%% The only output still sent to the Group Leader is the rate limit being
+%%% tripped, and any errors. The rest will be sent to the other IO
+%%% server (see [http://erlang.org/doc/apps/stdlib/io_protocol.html]).
 %%% @end
 -module(recon_trace).
 
 %% API
 -export([clear/0, calls/2, calls/3]).
 
-%% Internal exports
--export([count_tracer/1, rate_tracer/2, formatter/3]).
+-export([format/1]).
 
--type matchspec()   :: [{[term()], [term()], [term()]}].
--type shellfun()    :: fun((_) -> term()).
--type millisecs()   :: non_neg_integer().
--type pidspec()     :: all | existing | new | recon:pid_term().
--type max_traces()  :: non_neg_integer().
--type max_rate()    :: {max_traces(), millisecs()}.
+%% Internal exports
+-export([count_tracer/1, rate_tracer/2, formatter/5]).
+
+-type matchspec()    :: [{[term()], [term()], [term()]}].
+-type shellfun()     :: fun((_) -> term()).
+-type formatterfun() :: fun((_) -> iodata()).
+-type millisecs()    :: non_neg_integer().
+-type pidspec()      :: all | existing | new | recon:pid_term().
+-type max_traces()   :: non_neg_integer().
+-type max_rate()     :: {max_traces(), millisecs()}.
 
                    %% trace options
--type options()     :: [ {pid, pidspec() | [pidspec(),...]} % default: all
-                         | {timestamp, formatter | trace}   % default: formatter
-                         | {args, args | arity}             % default: args
+-type options()      :: [ {pid, pidspec() | [pidspec(),...]} % default: all
+                        | {timestamp, formatter | trace}     % default: formatter
+                        | {args, args | arity}               % default: args
+                        | {io_server, pid()}                 % default: group_leader()
+                        | {formatter, formatterfun()}        % default: internal formatter
+                        | return_to | {return_to, boolean()} % default: false
                    %% match pattern options
-                         | {scope, global | local}          % default: global
-                       ].
+                        | {scope, global | local}            % default: global
+                        ].
 
--type mod()         :: '_' | module().
--type fn()          :: '_' | atom().
--type args()        :: '_' | 0..255 | matchspec() | shellfun().
--type tspec()       :: {mod(), fn(), args()}.
--type max()         :: max_traces() | max_rate().
--type num_matches() :: non_neg_integer().
+-type mod()          :: '_' | module().
+-type fn()           :: '_' | atom().
+-type args()         :: '_' | 0..255 | return_trace | matchspec() | shellfun().
+-type tspec()        :: {mod(), fn(), args()}.
+-type max()          :: max_traces() | max_rate().
+-type num_matches()  :: non_neg_integer().
 
 -export_type([mod/0, fn/0, args/0, tspec/0, num_matches/0, options/0,
               max_traces/0, max_rate/0]).
@@ -228,7 +251,7 @@ calls(TSpecs = [_|_], Max) ->
 %% of trace messages to be received, or a maximal frequency (`{Num, Millisecs}').
 %%
 %% Here are examples of things to trace:
-%% 
+%%
 %% <ul>
 %%  <li>All calls from the `queue' module, with 10 calls printed at most:
 %%      ``recon_trace:calls({queue, '_', '_'}, 10)''</li>
@@ -249,7 +272,7 @@ calls(TSpecs = [_|_], Max) ->
 %%      `recon_trace:calls(TSpec, Max, [{args, arity}])'</li>
 %%  <li>Matching the `filter/2' functions of both `dict' and `lists' modules,
 %%      across new processes only:
-%%      `recon_trace:calls([{dict,filter,2},{lists,filter,2}], 10, [{pid, new]})'</li>
+%%      `recon_trace:calls([{dict,filter,2},{lists,filter,2}], 10, [{pid, new}])'</li>
 %%  <li>Tracing the `handle_call/3' functions of a given module for all new processes,
 %%      and those of an existing one registered with `gproc':
 %%      `recon_trace:calls({Mod,handle_call,3}, {10,100}, [{pid, [{via, gproc, Name}, new]}'</li>
@@ -258,7 +281,9 @@ calls(TSpecs = [_|_], Max) ->
 %%      or
 %%      ``recon_trace:calls({Mod,Fun,[{'_', [], [{return_trace}]}]}, Max, Opts)'',
 %%      the important bit being the `return_trace()' call or the
-%%      `{return_trace}' match spec value.</li>
+%%      `{return_trace}' match spec value.
+%%      A short-hand version for this pattern of 'match anything, trace everything'
+%%      for a function is `recon_trace:calls({Mod, Fun, return_trace})'. </li>
 %% </ul>
 %%
 %% There's a few more combination possible, with multiple trace patterns per call, and more
@@ -281,6 +306,16 @@ calls(TSpecs = [_|_], Max) ->
 %%      of local calls, pass in `{scope, local}'. This is useful whenever
 %%      you want to track the changes of code in a process that isn't called
 %%      with `Module:Fun(Args)', but just `Fun(Args)'.</li>
+%%  <li>`{formatter, fun(Term) -> io_data() end}': override the default
+%%       formatting functionality provided by recon.</li>
+%%  <li>`{io_server, pid() | atom()}': by default, recon logs to the current
+%%      group leader, usually the shell. This option allows to redirect
+%%      trace output to a different IO server (such as a file handle).</li>
+%%  <li>`return_to': If this option is set (in conjunction with the match
+%%      option `{scope, local}'), the function to which the value is returned
+%%      is output in a trace. Note that this is distinct from giving the
+%%      *caller* since exception handling or calls in tail position may
+%%      hide the original caller.</li>
 %% </ul>
 %%
 %% Also note that putting extremely large `Max' values (i.e. `99999999' or
@@ -291,13 +326,16 @@ calls(TSpecs = [_|_], Max) ->
 %% the node could ever handle, despite the precautions taken by this library.
 %% @end
 -spec calls(tspec() | [tspec(),...], max(), options()) -> num_matches().
+
 calls({Mod, Fun, Args}, Max, Opts) ->
-    calls([{Mod,Fun,Args}], Max,Opts);
+    calls([{Mod,Fun,Args}], Max, Opts);
 calls(TSpecs = [_|_], {Max, Time}, Opts) ->
-    Pid = setup(rate_tracer, [Max, Time]),
+    Pid = setup(rate_tracer, [Max, Time],
+                validate_formatter(Opts), validate_io_server(Opts)),
     trace_calls(TSpecs, Pid, Opts);
 calls(TSpecs = [_|_], Max, Opts) ->
-    Pid = setup(count_tracer, [Max]),
+    Pid = setup(count_tracer, [Max],
+                validate_formatter(Opts), validate_io_server(Opts)),
     trace_calls(TSpecs, Pid, Opts).
 
 %%%%%%%%%%%%%%%%%%%%%%%
@@ -334,13 +372,13 @@ rate_tracer(Max, Time, Count, Start) ->
     end.
 
 %% @private Formats traces to be output
-formatter(Tracer, Parent, Ref) ->
+formatter(Tracer, Parent, Ref, FormatterFun, IOServer) ->
     process_flag(trap_exit, true),
     link(Tracer),
     Parent ! {Ref, linked},
-    formatter(Tracer, group_leader()).
+    formatter(Tracer, IOServer, FormatterFun).
 
-formatter(Tracer, Leader) ->
+formatter(Tracer, IOServer, FormatterFun) ->
     receive
         {'EXIT', Tracer, normal} ->
             io:format("Recon tracer rate limit tripped.~n"),
@@ -348,8 +386,8 @@ formatter(Tracer, Leader) ->
         {'EXIT', Tracer, Reason} ->
             exit(Reason);
         TraceMsg ->
-            io:format(Leader, format(TraceMsg), []),
-            formatter(Tracer, Leader)
+            io:format(IOServer, FormatterFun(TraceMsg), []),
+            formatter(Tracer, IOServer, FormatterFun)
     end.
 
 
@@ -359,12 +397,12 @@ formatter(Tracer, Leader) ->
 
 %% starts the tracer and formatter processes, and
 %% cleans them up before each call.
-setup(TracerFun, TracerArgs) ->
+setup(TracerFun, TracerArgs, FormatterFun, IOServer) ->
     clear(),
     Ref = make_ref(),
     Tracer = spawn_link(?MODULE, TracerFun, TracerArgs),
     register(recon_trace_tracer, Tracer),
-    Format = spawn(?MODULE, formatter, [Tracer, self(), Ref]),
+    Format = spawn(?MODULE, formatter, [Tracer, self(), Ref, FormatterFun, IOServer]),
     register(recon_trace_formatter, Format),
     receive
         {Ref, linked} -> Tracer
@@ -390,6 +428,7 @@ trace_calls(TSpecs, Pid, Opts) ->
 
 validate_opts(Opts) ->
     PidSpecs = validate_pid_specs(proplists:get_value(pid, Opts, all)),
+    Scope = proplists:get_value(scope, Opts, global),
     TraceOpts = case proplists:get_value(timestamp, Opts, formatter) of
                     formatter -> [];
                     trace -> [timestamp]
@@ -397,8 +436,18 @@ validate_opts(Opts) ->
                  case proplists:get_value(args, Opts, args) of
                     args -> [];
                     arity -> [arity]
+                 end ++
+                 case proplists:get_value(return_to, Opts, undefined) of
+                     true when Scope =:= local ->
+                         [return_to];
+                     true when Scope =:= global ->
+                         io:format("Option return_to only works with option {scope, local}~n"),
+                         %% Set it anyway
+                         [return_to];
+                     _ ->
+                         []
                  end,
-    MatchOpts = [proplists:get_value(scope, Opts, global)],
+    MatchOpts = [Scope],
     {PidSpecs, TraceOpts, MatchOpts}.
 
 %% Support the regular specs, but also allow `recon:pid_term()' and lists
@@ -423,6 +472,9 @@ validate_pid_specs(PidTerm) ->
 
 validate_tspec(Mod, Fun, Args) when is_function(Args) ->
     validate_tspec(Mod, Fun, fun_to_ms(Args));
+%% helper to save typing for common actions
+validate_tspec(Mod, Fun, return_trace) ->
+    validate_tspec(Mod, Fun, [{'_', [], [{return_trace}]}]);
 validate_tspec(Mod, Fun, Args) ->
     BannedMods = ['_', ?MODULE, io, lists],
     %% The banned mod check can be bypassed by using
@@ -437,6 +489,15 @@ validate_tspec(Mod, Fun, Args) ->
         _ when is_list(Args) -> {'_', Args};
         _ when Args >= 0, Args =< 255 -> {Args, true}
     end.
+
+validate_formatter(Opts) ->
+    case proplists:get_value(formatter, Opts) of
+        F when is_function(F, 1) -> F;
+        _ -> fun format/1
+    end.
+
+validate_io_server(Opts) ->
+    proplists:get_value(io_server, Opts, group_leader()).
 
 %%%%%%%%%%%%%%%%%%%%%%%%
 %%% TRACE FORMATTING %%%
@@ -459,7 +520,7 @@ format(TraceMsg) ->
             {"~p:~p~s", [M,F,format_args(Args)]};
         %% {trace, Pid, return_to, {M, F, Arity}}
         {return_to, [{M,F,Arity}]} ->
-            {"~p:~p/~p", [M,F,Arity]};
+            {" '--> ~p:~p/~p", [M,F,Arity]};
         %% {trace, Pid, return_from, {M, F, Arity}, ReturnValue}
         {return_from, [{M,F,Arity}, Return]} ->
             {"~p:~p/~p --> ~p", [M,F,Arity, Return]};
@@ -503,14 +564,17 @@ format(TraceMsg) ->
         %% {trace, Pid, gc_start, Info}
         {gc_start, [Info]} ->
             HeapSize = proplists:get_value(heap_size, Info),
-            {"gc beginning -- heap ~p bytes", [HeapSize]};
+            OldHeapSize = proplists:get_value(old_heap_size, Info),
+            MbufSize = proplists:get_value(mbuf_size, Info),
+            {"gc beginning -- heap ~p bytes",
+             [HeapSize + OldHeapSize + MbufSize]};
         %% {trace, Pid, gc_end, Info}
         {gc_end, [Info]} ->
-            [Info] = TraceInfo,
             HeapSize = proplists:get_value(heap_size, Info),
             OldHeapSize = proplists:get_value(old_heap_size, Info),
-            {"gc finished -- heap ~p bytes (recovered ~p bytes)",
-             [HeapSize, OldHeapSize-HeapSize]};
+            MbufSize = proplists:get_value(mbuf_size, Info),
+            {"gc finished -- heap ~p bytes",
+             [HeapSize + OldHeapSize + MbufSize]};
         _ ->
             {"unknown trace type ~p -- ~p", [Type, TraceInfo]}
     end,
@@ -550,14 +614,14 @@ maybe_kill(Name) ->
         Pid ->
             unlink(Pid),
             exit(Pid, kill),
-            wait_for_death(Pid)
+            wait_for_death(Pid, Name)
     end.
 
-wait_for_death(Pid) ->
-    case is_process_alive(Pid) of
+wait_for_death(Pid, Name) ->
+    case is_process_alive(Pid) orelse whereis(Name) =:= Pid of
         true ->
             timer:sleep(10),
-            wait_for_death(Pid);
+            wait_for_death(Pid, Name);
         false ->
             ok
     end.
@@ -577,4 +641,4 @@ fun_to_ms(ShellFun) when is_function(ShellFun) ->
             end;
         false ->
             exit(shell_funs_only)
-    end. 
+    end.
